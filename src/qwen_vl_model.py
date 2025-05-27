@@ -5,7 +5,8 @@ from pathlib import Path
 from io import BytesIO
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from qwen_vl_utils import process_vision_info
 from PIL import Image
 
 logger = logging.getLogger()
@@ -40,22 +41,27 @@ class QwenVLModel:
             
             logger.info(f"Loading Qwen2.5-VL-7B-Instruct model from {model_path}")
             
-            # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_path, 
-                trust_remote_code=True
-            )
+            # Load processor for image and text processing
+            self.processor = AutoProcessor.from_pretrained(model_path)
             
             # Load model with reduced precision for efficiency
-            self.model = AutoModelForCausalLM.from_pretrained(
+            # Using the recommended class Qwen2_5_VLForConditionalGeneration
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 model_path,
-                device_map="auto",
-                torch_dtype=torch.float16,
-                trust_remote_code=True
+                torch_dtype="auto",  # Automatically select the best dtype
+                device_map="auto"    # Automatically distribute across available devices
             )
             
-            # Load processor for image processing
-            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            # We could enable flash_attention_2 for better performance if available
+            # self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            #     model_path,
+            #     torch_dtype=torch.bfloat16,
+            #     attn_implementation="flash_attention_2",
+            #     device_map="auto",
+            # )
+            
+            # Load tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
             
             logger.info("Qwen2.5-VL-7B-Instruct model loaded successfully")
             
@@ -103,17 +109,39 @@ class QwenVLModel:
             if isinstance(image, bytes):
                 image = Image.open(BytesIO(image))
             
-            # Prepare the prompt with system message
+            # Prepare the messages with system message and user content
             messages = [
                 {"role": "system", "content": "You are a document analysis assistant that can extract information from images of documents like invoices, receipts, and bills."},
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,dummy", "image": image}}
+                    {"type": "image", "image": image}
                 ]}
             ]
             
+            # Preparation for inference using the recommended approach
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            
+            # Move inputs to the same device as the model
+            inputs = inputs.to(self.device)
+            
             # Generate response
-            response = self.model.chat(self.tokenizer, messages)
+            generated_ids = self.model.generate(**inputs, max_new_tokens=512)
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            response = self.processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0]  # Get the first (and only) response
             
             return {
                 "answer": response,

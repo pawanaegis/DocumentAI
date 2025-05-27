@@ -231,8 +231,29 @@ class DocumentProcessor:
             {"role": "user", "content": text_prompt}
         ]
         
-        # Generate response using the chat method
-        response = self.qwen_model.model.chat(self.qwen_model.tokenizer, messages)
+        # Preparation for inference using the recommended approach
+        text = self.qwen_model.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        
+        # Process text input
+        inputs = self.qwen_model.processor(
+            text=[text],
+            padding=True,
+            return_tensors="pt",
+        )
+        
+        # Move inputs to the same device as the model
+        inputs = inputs.to(self.qwen_model.device)
+        
+        # Generate response
+        generated_ids = self.qwen_model.model.generate(**inputs, max_new_tokens=512)
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        response = self.qwen_model.processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]  # Get the first (and only) response
         
         return response
     
