@@ -15,11 +15,14 @@ def test_document_extraction():
     from dotenv import load_dotenv
     load_dotenv()
     
-    # Check if Mistral API key is set
-    if not os.environ.get("MISTRAL_API_KEY"):
-        print("ERROR: MISTRAL_API_KEY environment variable is not set.")
-        print("Please create a .env file in the project root with your Mistral API key.")
-        sys.exit(1)
+    # Check if Qwen model path is set (optional)
+    qwen_model_path = os.environ.get("QWEN_LOCAL_MODEL_PATH", "models/Qwen2.5-VL-7B-Instruct")
+    print(f"Using Qwen model path: {qwen_model_path}")
+    print("If the model is not found locally, it will be downloaded from Hugging Face.")
+    print("This may take some time for the first run.")
+    
+    # Create models directory if it doesn't exist
+    os.makedirs(qwen_model_path, exist_ok=True)
     
     # Path to test document
     document_path = input("Enter path to test document (PDF or image): ")
@@ -30,8 +33,11 @@ def test_document_extraction():
     with open(document_path, "rb") as f:
         document_bytes = f.read()
     
-    # Process document
-    processor = DocumentProcessor()
+    # Process document with Qwen model
+    print("\nInitializing Qwen2.5-VL-7B-Instruct model...")
+    processor = DocumentProcessor(use_local_model_first=True)
+    
+    print(f"Processing document with Qwen2.5-VL-7B-Instruct model...")
     result = processor.process_document(document_bytes, document_type, prompt)
     
     # Print result
