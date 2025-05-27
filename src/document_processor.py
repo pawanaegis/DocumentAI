@@ -24,29 +24,18 @@ class DocumentProcessor:
     
     def __init__(self, use_local_model_first: bool = True):
         """Initialize the document processor"""
-        # Mistral API configuration
-        self.mistral_api_key = os.environ.get("MISTRAL_API_KEY")
-        self.mistral_api_url = os.environ.get("MISTRAL_API_URL", "https://api.mistral.ai/v1/chat/completions")
-        self.mistral_model = os.environ.get("MISTRAL_MODEL", "mistral-large-latest")
-        
         # Qwen model configuration
-        self.use_qwen_model = os.environ.get("USE_QWEN_MODEL", "true").lower() == "true"
-        self.qwen_model = None
         self.use_local_model_first = use_local_model_first
+        self.qwen_model = None
         
-        # Initialize Qwen model if enabled
-        if self.use_qwen_model:
-            try:
-                logger.info("Initializing Qwen2.5-VL-7B-Instruct model")
-                self.qwen_model = QwenVLModel(use_local_first=use_local_model_first)
-                logger.info("Qwen2.5-VL-7B-Instruct model initialized successfully")
-            except Exception as e:
-                logger.warning(f"Failed to initialize Qwen2.5-VL-7B-Instruct model: {str(e)}")
-                logger.warning("Falling back to Mistral API for all document processing")
-                self.use_qwen_model = False
-        
-        if not self.use_qwen_model and not self.mistral_api_key:
-            logger.warning("MISTRAL_API_KEY not set and Qwen model not available. LLM processing will fail.")
+        # Initialize Qwen model
+        try:
+            logger.info("Initializing Qwen2.5-VL-7B-Instruct model")
+            self.qwen_model = QwenVLModel(use_local_first=use_local_model_first)
+            logger.info("Qwen2.5-VL-7B-Instruct model initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Qwen2.5-VL-7B-Instruct model: {str(e)}")
+            raise RuntimeError(f"Failed to initialize Qwen2.5-VL-7B-Instruct model: {str(e)}")
         
         # Define prompt template for document question answering
         self.prompt_template = PromptTemplate(
@@ -78,33 +67,35 @@ class DocumentProcessor:
         Returns:
             Dictionary with extracted information and metadata
         """
-        # Check if we can use Qwen model for visual processing
-        if self.use_qwen_model and document_type.startswith('image/'):
-            try:
-                logger.info("Using Qwen2.5-VL-7B-Instruct model for visual document processing")
-                result = self._process_with_qwen(document_bytes, prompt)
-                return result
-            except Exception as e:
-                logger.warning(f"Qwen model processing failed: {str(e)}. Falling back to OCR + Mistral.")
-                # Fall back to traditional OCR + LLM approach
+        if document_type.startswith('image/'):
+            # Direct processing for images using Qwen VL model
+            logger.info("Using Qwen2.5-VL-7B-Instruct model for visual document processing")
+            return self._process_with_qwen(document_bytes, prompt)
         
-        # Traditional approach: Extract text from document and use Mistral
-        document_text = self._extract_text(document_bytes, document_type)
-        
-        # Use Mistral to answer the prompt based on document text
-        filled_prompt = self.prompt_template.format(document_text=document_text, question=prompt)
-        response = self._call_mistral_api(filled_prompt)
-        
-        return {
-            "answer": response,
-            "confidence": self._calculate_confidence(response),
-            "metadata": {
-                "document_type": document_type,
-                "text_length": len(document_text),
-                "model": self.mistral_model,
-                "processing_method": "ocr_text_extraction"
+        elif document_type == 'application/pdf':
+            # For PDFs, extract text and then use Qwen for text processing
+            document_text = self._extract_text(document_bytes, document_type)
+            
+            # Convert text to prompt for Qwen
+            text_prompt = f"The following is text extracted from a PDF document. Based on this text, {prompt}\n\nDocument text: {document_text}"
+            
+            # Process with Qwen using text-only approach
+            result = self._process_with_qwen_text(text_prompt)
+            
+            return {
+                "answer": result,
+                "confidence": self._calculate_confidence(result),
+                "metadata": {
+                    "document_type": document_type,
+                    "text_length": len(document_text),
+                    "model": "Qwen2.5-VL-7B-Instruct",
+                    "processing_method": "pdf_text_extraction_qwen"
+                }
             }
-        }
+        
+        else:
+            # For other document types
+            raise DocumentProcessingError(f"Unsupported document type: {document_type}")
     
     def _extract_text(self, document_bytes: bytes, document_type: str) -> str:
         """
@@ -192,43 +183,7 @@ class DocumentProcessor:
             if os.path.exists(temp_pdf_path):
                 os.remove(temp_pdf_path)
     
-    def _call_mistral_api(self, prompt: str) -> str:
-        """
-        Call the Mistral API to get a response for the given prompt
-        
-        Args:
-            prompt: The prompt to send to Mistral
-            
-        Returns:
-            The response from Mistral
-        """
-        try:
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.mistral_api_key}"
-            }
-            
-            data = {
-                "model": self.mistral_model,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.0,
-                "max_tokens": 500
-            }
-            
-            response = requests.post(self.mistral_api_url, headers=headers, json=data)
-            
-            if response.status_code != 200:
-                logger.error(f"Mistral API error: {response.status_code} - {response.text}")
-                raise LLMProcessingError(f"Mistral API returned error: {response.status_code}")
-                
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-            
-        except Exception as e:
-            logger.error(f"Error calling Mistral API: {str(e)}")
-            raise LLMProcessingError(f"Failed to process with Mistral: {str(e)}")
+    # Mistral API method has been removed as we're now using Qwen exclusively
     
     def _process_with_qwen(self, document_bytes: bytes, prompt: str) -> Dict[str, Any]:
         """
@@ -256,6 +211,30 @@ class DocumentProcessor:
         result["metadata"]["processing_method"] = "qwen_vl_direct"
         
         return result
+        
+    def _process_with_qwen_text(self, text_prompt: str) -> str:
+        """
+        Process text-only content using the Qwen2.5-VL-7B-Instruct model
+        
+        Args:
+            text_prompt: Text prompt to send to the model
+            
+        Returns:
+            Model response as a string
+        """
+        if not self.qwen_model:
+            raise RuntimeError("Qwen model not initialized")
+            
+        # Create a text-only message for the model
+        messages = [
+            {"role": "system", "content": "You are a document analysis assistant that extracts information from text documents."},
+            {"role": "user", "content": text_prompt}
+        ]
+        
+        # Generate response using the chat method
+        response = self.qwen_model.model.chat(self.qwen_model.tokenizer, messages)
+        
+        return response
     
     def _calculate_confidence(self, response: str) -> float:
         """
